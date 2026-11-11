@@ -1,0 +1,9 @@
+name = "top100-cloudflare"
+compatibility_date = "2026-06-01"
+pages_build_output_dir = "./public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "top100-market"
+database_id = "5c94f22a-ea1c-43e2-887f-82e54bd7d91f"
+migrations_dir = "migrations"

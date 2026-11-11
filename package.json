@@ -1,0 +1,1 @@
+{"name":"top100-cloudflare","version":"1.0.0","private":true,"type":"module","scripts":{"dev":"wrangler pages dev public","test":"node --test tests/*.test.js"},"devDependencies":{"wrangler":"^4.0.0"}}
