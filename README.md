@@ -2,7 +2,21 @@
 
 这是 Top100 的独立 Cloudflare Pages + Pages Functions + D1 版本。它与原项目 `/root/project/Top100` 分开，运行时不依赖原项目，也不会修改原项目。
 
-## 一、项目结构
+## 一、使用 AI 辅助部署
+
+如果不熟悉 Cloudflare 配置，可以让具备终端权限的 AI 助手完成首次检查和部署。AI 需要能够访问本仓库、执行终端命令，并使用本机已经登录的 Wrangler：
+
+```sh
+npx wrangler login
+```
+
+AI 可以检查并配置 Pages 项目、D1 绑定、本地环境和首次部署。涉及创建线上 D1 或执行线上迁移时，应先说明影响并等待确认。
+
+不要把 Cloudflare API Token 粘贴到聊天窗口、提示词或仓库文件中。推荐首次配置完成后使用 GitHub 自动部署，后续只需向 `main` 分支推送代码，不需要每次重新提供 Token。
+
+可直接复制给 AI 的完整提示词、检查清单和安全要求见 [`DEPLOY_PROMPT.md`](DEPLOY_PROMPT.md)。
+
+## 二、项目结构
 
 - `public/`：Pages 静态资源目录，入口文件为 `public/index.html`。
 - `functions/_middleware.js`：将 `/api/*` 请求转交给 `worker.js`。
@@ -12,7 +26,7 @@
 
 行情数据主要来自 Yahoo Finance 的公开接口；指数成分和部分市值数据带有内置兜底数据。
 
-## 二、首次配置 Cloudflare Pages
+## 三、首次配置 Cloudflare Pages
 
 在 Cloudflare 控制台进入：
 
@@ -44,7 +58,7 @@ pages_build_output_dir = "./public"
 
 因此 Pages 控制台与仓库配置应保持一致。
 
-## 三、配置 D1
+## 四、配置 D1
 
 `wrangler.toml` 中应有一个名为 `top100-market` 的 D1 绑定，绑定变量为 `DB`。部署前确认其中的 `database_id` 是当前 Cloudflare 账户中的目标数据库 ID，不要把本地数据库 ID 当成线上数据库 ID。
 
@@ -69,7 +83,7 @@ npx wrangler d1 migrations apply top100-market --remote
 npx wrangler d1 migrations apply top100-market --local
 ```
 
-## 四、本地运行和检查
+## 五、本地运行和检查
 
 需要 Node.js、npm 和 Wrangler：
 
@@ -94,7 +108,7 @@ curl -i 'http://localhost:8788/api/fundamentals/AAPL'
 
 本地端口以 Wrangler 启动输出为准。如果端口已经被占用，应使用 Wrangler 提供的端口参数切换端口。
 
-## 五、通过 Git 自动部署
+## 六、通过 Git 自动部署
 
 Pages 项目正确绑定 GitHub 仓库后，向生产分支 `main` 推送提交即可触发自动部署：
 
@@ -115,18 +129,6 @@ git push origin main
 5. D1 绑定和数据库迁移已经完成。
 
 如果项目没有绑定 Git，也可以手动部署静态目录和 Functions，但手动部署不等于建立 Git 自动部署关系。
-
-## 六、使用 AI 辅助部署
-
-如果不熟悉 Cloudflare 配置，可以让具备终端权限的 AI 助手完成首次检查和部署。AI 需要能够访问本仓库、执行终端命令，并使用本机已经登录的 Wrangler：
-
-```sh
-npx wrangler login
-```
-
-不要把 Cloudflare API Token 粘贴到聊天窗口、提示词或仓库文件中。推荐首次配置完成后使用 GitHub 自动部署，后续只需向 `main` 分支推送代码，不需要每次重新提供 Token。
-
-可直接复制给 AI 的完整提示词、检查清单和安全要求见 [`DEPLOY_PROMPT.md`](DEPLOY_PROMPT.md)。
 
 ## 七、部署后验收
 
