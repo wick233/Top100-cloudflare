@@ -116,7 +116,19 @@ git push origin main
 
 如果项目没有绑定 Git，也可以手动部署静态目录和 Functions，但手动部署不等于建立 Git 自动部署关系。
 
-## 六、部署后验收
+## 六、使用 AI 辅助部署
+
+如果不熟悉 Cloudflare 配置，可以让具备终端权限的 AI 助手完成首次检查和部署。AI 需要能够访问本仓库、执行终端命令，并使用本机已经登录的 Wrangler：
+
+```sh
+npx wrangler login
+```
+
+不要把 Cloudflare API Token 粘贴到聊天窗口、提示词或仓库文件中。推荐首次配置完成后使用 GitHub 自动部署，后续只需向 `main` 分支推送代码，不需要每次重新提供 Token。
+
+可直接复制给 AI 的完整提示词、检查清单和安全要求见 [`DEPLOY_PROMPT.md`](DEPLOY_PROMPT.md)。
+
+## 七、部署后验收
 
 部署成功后，先打开首页，再检查接口：
 
@@ -139,7 +151,7 @@ curl -i https://你的项目.pages.dev/api/fundamentals/AAPL
 - 基本面接口即使 Yahoo 数据源不可用，也应返回可显示的兜底结果，而不是让整个页面报错。
 - Cloudflare 部署日志中不再出现 `public not found` 或 `build output directory is outside of the repository`。
 
-## 七、常见错误
+## 八、常见错误
 
 ### `Output directory "public" not found`
 
@@ -171,7 +183,7 @@ npx wrangler d1 migrations apply top100-market --remote
 
 不要只在 `--local` 数据库执行迁移后就认为线上已经完成。
 
-## 八、已知限制
+## 九、已知限制
 
 - Yahoo Finance 接口不是稳定的官方 API，可能限流、拒绝 Workers 请求或变更响应格式。
 - 排名接口会并行请求成分股历史数据，大指数请求量较大时可能触发限流。
