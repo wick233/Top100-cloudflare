@@ -53,6 +53,22 @@ test("market API validates request parameters", async () => {
   assert.equal((await get("/api/stock/AAPL?range=nope")).status, 400);
   assert.equal((await get("/api/compare")).status, 400);
   assert.equal((await get("/api/compare?symbols=AAPL,MSFT,NVDA,AMZN,META,AVGO,GOOGL,TSLA,COST,NFLX,AMD,CSCO,QCOM,INTU,ADBE,ISRG")).status, 400);
+  assert.equal((await get("/api/rank?index=sp500&range=bad")).status, 400);
+});
+
+test("fundamentals returns a displayable fallback when Yahoo rejects the request", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ quoteSummary: { error: { description: "HTTP 401" } } }), { status: 401 });
+  try {
+    const response = await get("/api/fundamentals/AAPL");
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.ticker, "AAPL");
+    assert.ok(body.business_summary);
+    assert.ok(body.source_error.includes("401"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("non-API requests are delegated to Pages assets", async () => {

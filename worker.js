@@ -1,7 +1,7 @@
 import { TOP100 } from "./top100.js";
 import { INDICES, FALLBACK } from "./indices.js";
 
-const RANGES = new Set(["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"]);
+const RANGES = new Set(["1wk", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"]);
 const INTERVALS = new Set(["1d", "1wk", "1mo"]);
 const INDEX_HISTORY = {
   sp500: { ticker: "^GSPC", name: "标普500指数" },
@@ -53,10 +53,11 @@ async function yahooChart(ticker, range, interval) {
 }
 
 async function getBars(env, ticker, interval, range) {
+  const upstreamRange = range === "1wk" ? "5d" : range;
   const cacheKey = `bars:${ticker}:${interval}:${range}`;
   const hit = await cached(env, cacheKey);
   if (hit?.bars?.length) return hit;
-  const { meta, bars } = await yahooChart(ticker, range, interval);
+  const { meta, bars } = await yahooChart(ticker, upstreamRange, interval);
   if (!bars.length) return { meta, bars: [] };
   const stmt = env.DB.prepare("INSERT INTO bars(ticker,interval,date,open,high,low,close,volume) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(ticker,interval,date) DO UPDATE SET open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume");
   for (let i = 0; i < bars.length; i += 100) {
@@ -97,10 +98,10 @@ function companyName(symbol) {
   return symbol;
 }
 
-async function historyResponse(env, ticker, range, interval) {
+async function historyResponse(env, ticker, range, interval, displayName = companyName(ticker)) {
   const { bars } = await getBars(env, ticker, interval, range);
   if (!bars.length) throw new Error(`${ticker} has no history`);
-  return { ticker, name: companyName(ticker), range, interval, start: bars[0].date, end: bars.at(-1).date,
+  return { ticker, name: displayName, range, interval, start: bars[0].date, end: bars.at(-1).date,
     bars: bars.map((b) => [b.date, b.open, b.close, b.low, b.high, b.volume]) };
 }
 
@@ -118,11 +119,14 @@ async function stocksRoute(url, env) {
 
 async function quoteRoute(symbol, env) {
   const row = TOP100.find(([ticker]) => ticker === symbol);
-  if (!row) return error(`未知代码: ${symbol}`, 404);
+  const fallback = row || (await indexConstituents("sp500")).find((item) => item.symbol === symbol)
+    || (await indexConstituents("ndx100")).find((item) => item.symbol === symbol);
+  if (!fallback) return error(`未知代码: ${symbol}`, 404);
   const key = `quote:${symbol}`;
   const hit = await cached(env, key);
   if (hit) return json(hit);
-  let result = { ticker: symbol, symbol, marketCap: Number(row[2]) };
+  const bundledCap = Array.isArray(fallback) ? Number(fallback[2]) : Number(fallback.market_cap_b || 0);
+  let result = { ticker: symbol, symbol, marketCap: bundledCap };
   try {
     const response = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=price`, { headers: { "user-agent": "Mozilla/5.0 Top100Dashboard/1.0" } });
     if (response.ok) {
@@ -138,17 +142,21 @@ async function quoteRoute(symbol, env) {
 async function rankRoute(url, env) {
   const index = (url.searchParams.get("index") || "top100").toLowerCase();
   if (!INDICES[index]) return error(`未知指数: ${index}`, 400);
-  const key = `rank:${index}`;
+  const range = url.searchParams.get("range") || "1d";
+  if (!["1d", "1wk", "1mo", "3mo", "6mo", "1y"].includes(range)) return error("range 需为 1d、1wk、1mo、3mo、6mo 或 1y");
+  const key = `rank:${index}:${range}`;
   const hit = await cached(env, key);
   if (hit) return json(hit);
   const constituents = await indexConstituents(index);
   const rows = await Promise.all(constituents.map(async ({ symbol }) => {
     try {
-      const { bars } = await getBars(env, symbol, "1d", "5d");
+      const requestedRange = range === "1d" ? "1mo" : range;
+      const { bars } = await getBars(env, symbol, "1d", requestedRange);
       if (bars.length < 2) throw new Error("missing previous close");
-      const last = bars.at(-1), prev = bars.at(-2);
-      return { symbol, price: last.close, prev_close: prev.close, chg_pct: Number(((last.close - prev.close) / prev.close * 100).toFixed(2)) };
-    } catch { return { symbol, price: null, prev_close: null, chg_pct: null }; }
+      const last = bars.at(-1), start = range === "1d" ? bars.at(-2) : bars[0];
+      const change = Number(((last.close - start.close) / start.close * 100).toFixed(2));
+      return { symbol, name: companyName(symbol), price: last.close, prev_close: start.close, chg_pct: change, date: last.date, start_date: start.date };
+    } catch { return { symbol, name: companyName(symbol), price: null, prev_close: null, chg_pct: null, date: null, start_date: null }; }
   }));
   await putCache(env, key, rows, 60);
   return json(rows);
@@ -199,7 +207,10 @@ async function fundamentalsRoute(symbol) {
       fifty_two_week_low: value(result.summaryDetail, "fiftyTwoWeekLow"),
     };
     return { ticker: symbol, name: result.price?.longName || result.price?.shortName || symbol, sector: result.summaryProfile?.sector || null, industry: result.summaryProfile?.industry || null, currency: result.price?.currency || "USD", metrics, annual: [], dividends: [], updated_at: Math.floor(Date.now() / 1000) };
-  } catch (e) { throw new Error(`基本面数据源不可用：${e.message}`); }
+  } catch (e) {
+    const name = companyName(symbol);
+    return { ticker: symbol, name, business_summary: `${name}是一家在美国上市的公司，页面暂未收录经核实的详细中文业务资料。`, sector: null, industry: null, currency: "USD", metrics: {}, annual: [], dividends: [], source_error: `基本面数据源不可用：${e.message}` };
+  }
 }
 
 async function logoRoute(symbol) {
@@ -249,7 +260,7 @@ async function api(request, env) {
     if (!INDEX_HISTORY[id]) return error("index_id 需为 sp500 或 ndx100");
     const range = url.searchParams.get("range") || "1y", interval = url.searchParams.get("interval") || "1d";
     if (!RANGES.has(range) || !INTERVALS.has(interval)) return error("无效的时间范围或周期");
-    try { return json(await historyResponse(env, INDEX_HISTORY[id].ticker, range, interval)); }
+    try { return json(await historyResponse(env, INDEX_HISTORY[id].ticker, range, interval, INDEX_HISTORY[id].name)); }
     catch (e) { return error(`拉取指数数据失败: ${e.message}`, 502); }
   }
   if (path === "/api/export/" || path.startsWith("/api/export/")) {
