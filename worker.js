@@ -25,14 +25,25 @@ function urlFor(path, query = {}) {
   for (const [key, value] of Object.entries(query)) if (value != null) url.searchParams.set(key, value);
   return url;
 }
+// The D1 cache is best-effort in both directions: a failed read is a cache miss and a
+// failed write (outage, exhausted write quota, missing migration) must not fail a
+// response whose data was already fetched upstream.
 async function cached(env, key) {
-  const row = await env.DB.prepare("SELECT payload FROM cache WHERE cache_key=? AND expires_at>? ").bind(key, Date.now()).first();
-  if (!row) return null;
-  try { return JSON.parse(row.payload); } catch { return null; }
+  try {
+    const row = await env.DB.prepare("SELECT payload FROM cache WHERE cache_key=? AND expires_at>? ").bind(key, Date.now()).first();
+    return row ? JSON.parse(row.payload) : null;
+  } catch (e) {
+    console.warn(`cache read failed for ${key}: ${e?.message}`);
+    return null;
+  }
 }
 async function putCache(env, key, value, ttl = 300) {
-  await env.DB.prepare("INSERT INTO cache(cache_key,payload,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,expires_at=excluded.expires_at")
-    .bind(key, JSON.stringify(value), Date.now() + ttl * 1000).run();
+  try {
+    await env.DB.prepare("INSERT INTO cache(cache_key,payload,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,expires_at=excluded.expires_at")
+      .bind(key, JSON.stringify(value), Date.now() + ttl * 1000).run();
+  } catch (e) {
+    console.warn(`cache write failed for ${key}: ${e?.message}`);
+  }
 }
 
 async function yahooChart(ticker, range, interval) {
@@ -59,17 +70,23 @@ async function getBars(env, ticker, interval, range) {
   if (hit?.bars?.length) return hit;
   const { meta, bars } = await yahooChart(ticker, upstreamRange, interval);
   if (!bars.length) return { meta, bars: [] };
-  const stmt = env.DB.prepare("INSERT INTO bars(ticker,interval,date,open,high,low,close,volume) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(ticker,interval,date) DO UPDATE SET open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume");
-  for (let i = 0; i < bars.length; i += 100) {
-    await env.DB.batch(bars.slice(i, i + 100).map((b) => stmt.bind(ticker, interval, b.date, b.open, b.high, b.low, b.close, b.volume)));
-  }
   const result = { meta, bars };
   await putCache(env, cacheKey, result, 300);
   return result;
 }
 
+const TOP100_BY_SYMBOL = new Map(TOP100.map((row) => [row[0], row]));
+
+// Index members that are also in the bundled Top100 reuse its market cap and sector,
+// so the list has something to show without a per-company quote request.
+function constituentRow(rank, symbol, name, weightPct) {
+  const top = TOP100_BY_SYMBOL.get(symbol);
+  return { rank, symbol, name, weight_pct: weightPct, market_cap_b: top ? Number(top[2]) : null, sector: top ? top[3] : null };
+}
+
+// Returns { rows, live }; live is false when the bundled fallback list was used.
 async function indexConstituents(id) {
-  if (id === "top100") return TOP100.map(([symbol, name, cap, sector], i) => ({ rank: i + 1, symbol, ticker: symbol, name, weight_pct: null, market_cap_b: Number(cap), sector }));
+  if (id === "top100") return { live: true, rows: TOP100.map(([symbol, name, cap, sector], i) => ({ rank: i + 1, symbol, name, weight_pct: null, market_cap_b: Number(cap), sector })) };
   const fallback = FALLBACK[id] || [];
   const candidates = id === "sp500" ? ["https://www.slickcharts.com/sp500"] : ["https://www.slickcharts.com/nasdaq100"];
   for (const source of candidates) {
@@ -80,16 +97,31 @@ async function indexConstituents(id) {
       const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].slice(1).map((match) => {
         const cells = [...match[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1].replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").trim());
         if (cells.length < 4 || !/^[A-Z0-9.-]+$/.test(cells[2])) return null;
-        return { rank: Number.parseInt(cells[0], 10) || 0, symbol: cells[2], ticker: cells[2], name: cells[1], weight_pct: Number.parseFloat(cells[3].replace(/[^0-9.-]/g, "")) || null, market_cap_b: null, sector: null };
+        // Yahoo and the bundled lists write share classes with a dash (BRK-B), not a dot.
+        const symbol = cells[2].replace(/\./g, "-");
+        return constituentRow(Number.parseInt(cells[0], 10) || 0, symbol, cells[1], Number.parseFloat(cells[3].replace(/[^0-9.-]/g, "")) || null);
       }).filter(Boolean);
-      if (rows.length) return rows;
+      if (rows.length) return { live: true, rows };
     } catch { /* use bundled fallback */ }
   }
-  return fallback.map(([rank, symbol, name]) => ({ rank, symbol, ticker: symbol, name, weight_pct: null, market_cap_b: null, sector: null }));
+  return { live: false, rows: fallback.map(([rank, symbol, name]) => constituentRow(rank, symbol, name, null)) };
+}
+
+// Cached constituent list shared by the stocks, quote and rank routes. A scraped list
+// is kept for 6 hours; the short bundled fallback only for 10 minutes, so a transient
+// scrape failure does not pin the fallback list for hours.
+async function constituents(env, id) {
+  if (id === "top100") return (await indexConstituents(id)).rows;
+  const key = `constituents:${id}`;
+  const hit = await cached(env, key);
+  if (hit?.length) return hit;
+  const { rows, live } = await indexConstituents(id);
+  await putCache(env, key, rows, live ? 6 * 3600 : 600);
+  return rows;
 }
 
 function companyName(symbol) {
-  const top = TOP100.find(([ticker]) => ticker === symbol);
+  const top = TOP100_BY_SYMBOL.get(symbol);
   if (top) return top[1];
   for (const rows of Object.values(FALLBACK)) {
     const match = rows.find((row) => row[1] === symbol);
@@ -108,25 +140,18 @@ async function historyResponse(env, ticker, range, interval, displayName = compa
 async function stocksRoute(url, env) {
   const index = (url.searchParams.get("index") || "top100").toLowerCase();
   if (!INDICES[index]) return error(`未知指数: ${index}`, 400);
-  const key = `stocks:${index}`;
-  const hit = await cached(env, key);
-  if (hit) return json(hit);
-  const rows = await indexConstituents(index);
-  const clean = rows.map((s) => ({ rank: s.rank, symbol: s.symbol, name: s.name || s.symbol, weight_pct: s.weight_pct, sector: s.sector, market_cap_b: s.market_cap_b }));
-  await putCache(env, key, clean, 6 * 3600);
-  return json(clean);
+  return json(await constituents(env, index));
 }
 
 async function quoteRoute(symbol, env) {
-  const row = TOP100.find(([ticker]) => ticker === symbol);
-  const fallback = row || (await indexConstituents("sp500")).find((item) => item.symbol === symbol)
-    || (await indexConstituents("ndx100")).find((item) => item.symbol === symbol);
-  if (!fallback) return error(`未知代码: ${symbol}`, 404);
   const key = `quote:${symbol}`;
   const hit = await cached(env, key);
   if (hit) return json(hit);
-  const bundledCap = Array.isArray(fallback) ? Number(fallback[2]) : Number(fallback.market_cap_b || 0);
-  let result = { ticker: symbol, symbol, marketCap: bundledCap };
+  const top = TOP100_BY_SYMBOL.get(symbol);
+  const known = top || (await constituents(env, "sp500")).some((item) => item.symbol === symbol)
+    || (await constituents(env, "ndx100")).some((item) => item.symbol === symbol);
+  if (!known) return error(`未知代码: ${symbol}`, 404);
+  let result = { ticker: symbol, symbol, marketCap: top ? Number(top[2]) : 0 };
   try {
     const response = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=price`, { headers: { "user-agent": "Mozilla/5.0 Top100Dashboard/1.0" } });
     if (response.ok) {
@@ -147,16 +172,18 @@ async function rankRoute(url, env) {
   const key = `rank:${index}:${range}`;
   const hit = await cached(env, key);
   if (hit) return json(hit);
-  const constituents = await indexConstituents(index);
-  const rows = await Promise.all(constituents.map(async ({ symbol }) => {
+  const members = await constituents(env, index);
+  const rows = await Promise.all(members.map(async ({ symbol, name: listedName }) => {
+    // The constituent list carries the real company name; companyName() only knows bundled symbols.
+    const name = listedName || companyName(symbol);
     try {
       const requestedRange = range === "1d" ? "1mo" : range;
       const { bars } = await getBars(env, symbol, "1d", requestedRange);
       if (bars.length < 2) throw new Error("missing previous close");
       const last = bars.at(-1), start = range === "1d" ? bars.at(-2) : bars[0];
       const change = Number(((last.close - start.close) / start.close * 100).toFixed(2));
-      return { symbol, name: companyName(symbol), price: last.close, prev_close: start.close, chg_pct: change, date: last.date, start_date: start.date };
-    } catch { return { symbol, name: companyName(symbol), price: null, prev_close: null, chg_pct: null, date: null, start_date: null }; }
+      return { symbol, name, price: last.close, prev_close: start.close, chg_pct: change, date: last.date, start_date: start.date };
+    } catch { return { symbol, name, price: null, prev_close: null, chg_pct: null, date: null, start_date: null }; }
   }));
   await putCache(env, key, rows, 60);
   return json(rows);

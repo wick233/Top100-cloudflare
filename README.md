@@ -21,7 +21,7 @@ AI 可以检查并配置 Pages 项目、D1 绑定、本地环境和首次部署�
 - `public/`：Pages 静态资源目录，入口文件为 `public/index.html`。
 - `functions/_middleware.js`：将 `/api/*` 请求转交给 `worker.js`。
 - `worker.js`：使用 Workers Fetch API 和 D1 实现行情、排名、历史数据、公司资料等接口。
-- `migrations/0001_init.sql`：创建行情历史表 `bars` 和缓存表 `cache`。
+- `migrations/0001_init.sql`：创建行情历史表 `bars` 和缓存表 `cache`。Worker 目前只使用 `cache`；`bars` 表保留但不再写入。
 - `wrangler.toml`：保存 Pages 输出目录和 D1 绑定配置。
 
 行情数据主要来自 Yahoo Finance 的公开接口；指数成分和部分市值数据带有内置兜底数据。
@@ -175,9 +175,9 @@ curl -i https://你的项目.pages.dev/api/fundamentals/AAPL
 
 Yahoo 的 `quoteSummary` 是非官方公开接口，可能返回 401、限流或字段变化。当前 Worker 会返回带有 `source_error` 的可显示兜底结果；这不代表已经获得完整、权威的年报或分红数据。若生产环境需要稳定的基本面数据，应接入有授权的行情数据供应商。
 
-### D1 相关接口返回 500
+### D1 不可用或未迁移
 
-确认生产 D1 已执行迁移，并且 `wrangler.toml` 的数据库绑定指向正确数据库。线上数据库迁移使用：
+D1 只用作缓存，读写失败不会让接口报错：Worker 会跳过缓存直接请求上游，并在日志中输出 `cache read failed` / `cache write failed`。表现为接口明显变慢、更容易触发 Yahoo 限流。如果在 Cloudflare 日志里看到这两类警告，确认生产 D1 已执行迁移，并且 `wrangler.toml` 的数据库绑定指向正确数据库。线上数据库迁移使用：
 
 ```sh
 npx wrangler d1 migrations apply top100-market --remote
