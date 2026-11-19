@@ -1,5 +1,6 @@
 import { TOP100 } from "./top100.js";
 import { INDICES, FALLBACK } from "./indices.js";
+import { PROFILES } from "./profiles.js";
 
 const RANGES = new Set(["1wk", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"]);
 const INTERVALS = new Set(["1d", "1wk", "1mo"]);
@@ -81,7 +82,7 @@ const TOP100_BY_SYMBOL = new Map(TOP100.map((row) => [row[0], row]));
 // so the list has something to show without a per-company quote request.
 function constituentRow(rank, symbol, name, weightPct) {
   const top = TOP100_BY_SYMBOL.get(symbol);
-  return { rank, symbol, name, weight_pct: weightPct, market_cap_b: top ? Number(top[2]) : null, sector: top ? top[3] : null };
+  return { rank, symbol, name, weight_pct: weightPct, market_cap_b: top ? Number(top[2]) : null, sector: top ? top[3] : PROFILES[symbol]?.[0] ?? null };
 }
 
 // Returns { rows, live }; live is false when the bundled fallback list was used.
@@ -214,11 +215,21 @@ async function compareRoute(url, env) {
   return json(result);
 }
 
+// The bundled Chinese profile is applied when the response is built, not when it is
+// cached, so editing profiles.js takes effect on the next deploy instead of a day later.
+// It wins over the upstream (English) summary and sector; companies without a bundled
+// profile keep whatever upstream returned, which may be nothing.
+function withProfile(data) {
+  const profile = PROFILES[data.ticker];
+  if (!profile) return data;
+  return { ...data, sector: profile[0], business_summary: profile[1] };
+}
+
 async function fundamentalsRoute(symbol) {
   // Yahoo's public quoteSummary endpoint is not a supported fundamentals API.
   // Return a clear response until a stable licensed provider is configured.
   try {
-    const response = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=price,summaryDetail,defaultKeyStatistics,financialData`, { headers: { "user-agent": "Mozilla/5.0 Top100Dashboard/1.0" } });
+    const response = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile`, { headers: { "user-agent": "Mozilla/5.0 Top100Dashboard/1.0" } });
     const body = await response.json();
     const result = body?.quoteSummary?.result?.[0];
     if (!response.ok || !result) throw new Error(body?.quoteSummary?.error?.description || `HTTP ${response.status}`);
@@ -233,10 +244,11 @@ async function fundamentalsRoute(symbol) {
       beta: value(result.defaultKeyStatistics, "beta"), fifty_two_week_high: value(result.summaryDetail, "fiftyTwoWeekHigh"),
       fifty_two_week_low: value(result.summaryDetail, "fiftyTwoWeekLow"),
     };
-    return { ticker: symbol, name: result.price?.longName || result.price?.shortName || symbol, sector: result.summaryProfile?.sector || null, industry: result.summaryProfile?.industry || null, currency: result.price?.currency || "USD", metrics, annual: [], dividends: [], updated_at: Math.floor(Date.now() / 1000) };
+    return { ticker: symbol, name: result.price?.longName || result.price?.shortName || symbol, business_summary: result.assetProfile?.longBusinessSummary || null, sector: result.assetProfile?.sector || null, industry: result.assetProfile?.industry || null, currency: result.price?.currency || "USD", metrics, annual: [], dividends: [], updated_at: Math.floor(Date.now() / 1000) };
   } catch (e) {
-    const name = companyName(symbol);
-    return { ticker: symbol, name, business_summary: `${name}是一家在美国上市的公司，页面暂未收录经核实的详细中文业务资料。`, sector: null, industry: null, currency: "USD", metrics: {}, annual: [], dividends: [], source_error: `基本面数据源不可用：${e.message}` };
+    // No placeholder text: a null summary lets the page hide the section instead of
+    // showing a sentence that says nothing.
+    return { ticker: symbol, name: companyName(symbol), business_summary: null, sector: null, industry: null, currency: "USD", metrics: {}, annual: [], dividends: [], source_error: `基本面数据源不可用：${e.message}` };
   }
 }
 
@@ -266,11 +278,13 @@ async function api(request, env) {
     if (kind === "quote") return quoteRoute(symbol, env);
     if (kind === "logo") return logoRoute(symbol);
     if (kind === "fundamentals") {
-      const key = `fundamentals:${symbol}`;
+      // v2: entries cached under the old key carry a placeholder business_summary.
+      const key = `fundamentals:v2:${symbol}`;
       const force = url.searchParams.get("refresh") === "true";
       const hit = force ? null : await cached(env, key);
-      if (hit) return json(hit);
-      try { const result = await fundamentalsRoute(symbol); await putCache(env, key, result, 86400); return json(result); }
+      if (hit) return json(withProfile(hit));
+      // A failed upstream lookup is retried after 30 minutes rather than pinned for a day.
+      try { const result = await fundamentalsRoute(symbol); await putCache(env, key, result, result.source_error ? 1800 : 86400); return json(withProfile(result)); }
       catch (e) { return error(e.message, 502); }
     }
     if (kind === "stock") {

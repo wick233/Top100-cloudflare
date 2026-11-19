@@ -21,6 +21,7 @@ AI 可以检查并配置 Pages 项目、D1 绑定、本地环境和首次部署�
 - `public/`：Pages 静态资源目录，入口文件为 `public/index.html`。
 - `functions/_middleware.js`：将 `/api/*` 请求转交给 `worker.js`。
 - `worker.js`：使用 Workers Fetch API 和 D1 实现行情、排名、历史数据、公司资料等接口。
+- `profiles.js`：内置的公司中文简介和行业（代码 → `[行业, 简介]`）。`/api/fundamentals` 优先返回这里的内容；未收录的公司尝试取 Yahoo 的英文简介，取不到时页面隐藏"公司简介"区块。修改后重新部署即生效。
 - `migrations/0001_init.sql`：创建行情历史表 `bars` 和缓存表 `cache`。Worker 目前只使用 `cache`；`bars` 表保留但不再写入。
 - `wrangler.toml`：保存 Pages 输出目录和 D1 绑定配置。
 

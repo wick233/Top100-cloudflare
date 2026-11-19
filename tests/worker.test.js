@@ -71,6 +71,40 @@ test("fundamentals returns a displayable fallback when Yahoo rejects the request
   }
 });
 
+test("company profiles come from the bundled Chinese text, never a placeholder", async () => {
+  const { PROFILES } = await import("../profiles.js");
+  const { TOP100 } = await import("../top100.js");
+  const { FALLBACK } = await import("../indices.js");
+  const bundled = [...TOP100.map((row) => row[0]), ...Object.values(FALLBACK).flat().map((row) => row[1])];
+  assert.deepEqual(bundled.filter((symbol) => !PROFILES[symbol]), []);
+  for (const [symbol, profile] of Object.entries(PROFILES)) {
+    assert.equal(profile.length, 2, symbol);
+    assert.ok(profile[0] && profile[1].length > 10 && profile[1].endsWith("。"), symbol);
+  }
+
+  const env = fakeEnv();
+  const call = async (path) => (await worker.fetch(new Request(`https://example.test${path}`), env)).json();
+  await withFetch(() => new Response("{}", { status: 401 }), async () => {
+    const apple = await call("/api/fundamentals/AAPL");
+    assert.equal(apple.business_summary, PROFILES.AAPL[1]);
+    assert.equal(apple.sector, "科技");
+    assert.ok(!apple.business_summary.includes("暂未收录"));
+    // Not bundled and upstream failed: no summary at all, so the page hides the section.
+    assert.equal((await call("/api/fundamentals/ZBRA")).business_summary, null);
+  });
+  await withFetch(() => new Response(JSON.stringify({ quoteSummary: { result: [{
+    price: { longName: "Zebra Technologies Corporation" },
+    assetProfile: { longBusinessSummary: "Zebra makes barcode scanners.", sector: "Technology", industry: "Communication Equipment" },
+  }] } })), async () => {
+    const zebra = await call("/api/fundamentals/ZBRA?refresh=true");
+    assert.equal(zebra.business_summary, "Zebra makes barcode scanners.");
+    assert.equal(zebra.industry, "Communication Equipment");
+    // The bundled profile still wins when upstream answers, including on a cache hit.
+    assert.equal((await call("/api/fundamentals/MSFT")).business_summary, PROFILES.MSFT[1]);
+    assert.equal((await call("/api/fundamentals/MSFT")).business_summary, PROFILES.MSFT[1]);
+  });
+});
+
 async function withFetch(handler, run) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => handler(String(input?.url ?? input));
