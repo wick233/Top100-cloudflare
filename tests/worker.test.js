@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import worker from "../worker.js";
 
@@ -90,19 +91,48 @@ test("company profiles come from the bundled Chinese text, never a placeholder",
     assert.equal(apple.sector, "科技");
     assert.ok(!apple.business_summary.includes("暂未收录"));
     // Not bundled and upstream failed: no summary at all, so the page hides the section.
-    assert.equal((await call("/api/fundamentals/ZBRA")).business_summary, null);
+    assert.equal((await call("/api/fundamentals/ZZZZZZ")).business_summary, null);
   });
   await withFetch(() => new Response(JSON.stringify({ quoteSummary: { result: [{
-    price: { longName: "Zebra Technologies Corporation" },
-    assetProfile: { longBusinessSummary: "Zebra makes barcode scanners.", sector: "Technology", industry: "Communication Equipment" },
+    price: { longName: "Unlisted Profile Fixture" },
+    assetProfile: { longBusinessSummary: "The fixture makes office equipment.", sector: "Industrials", industry: "Office Equipment" },
   }] } })), async () => {
-    const zebra = await call("/api/fundamentals/ZBRA?refresh=true");
-    assert.equal(zebra.business_summary, "Zebra makes barcode scanners.");
-    assert.equal(zebra.industry, "Communication Equipment");
+    const unbundled = await call("/api/fundamentals/ZZZZZZ?refresh=true");
+    assert.equal(unbundled.business_summary, "The fixture makes office equipment.");
+    assert.equal(unbundled.industry, "Office Equipment");
     // The bundled profile still wins when upstream answers, including on a cache hit.
     assert.equal((await call("/api/fundamentals/MSFT")).business_summary, PROFILES.MSFT[1]);
     assert.equal((await call("/api/fundamentals/MSFT")).business_summary, PROFILES.MSFT[1]);
   });
+});
+
+test("a newly covered S&P 500 company has a Chinese profile even when Yahoo is down", async () => {
+  await withFetch(() => new Response("{}", { status: 401 }), async () => {
+    const profile = await (await get("/api/fundamentals/ZBRA")).json();
+    assert.match(profile.business_summary || "", /条码/);
+  });
+});
+
+test("the checked constituent snapshot has a Chinese profile for every security", async () => {
+  const readData = (name) => JSON.parse(readFileSync(new URL(`../data/${name}.json`, import.meta.url), "utf8"));
+  const snapshot = readData("profile-constituents");
+  const provenance = readData("profile-sources");
+  const { PROFILES } = await import("../profiles.js");
+  assert.match(snapshot.checked_on, /^\d{4}-\d{2}-\d{2}$/);
+  const covered = new Set();
+  for (const [id, count] of [["sp500", 503], ["ndx100", 101]]) {
+    const symbols = Object.keys(snapshot.indices[id].securities);
+    assert.equal(symbols.length, count, id);
+    assert.deepEqual(symbols.filter((symbol) => !/\p{Script=Han}/u.test(PROFILES[symbol]?.[1] ?? "")), [], id);
+    for (const symbol of symbols) covered.add(symbol);
+  }
+  assert.equal(covered.size, 518);
+  assert.equal(Object.keys(provenance.sources).length, 329);
+  assert.equal(provenance.checked_on, snapshot.checked_on);
+  for (const [symbol, url] of Object.entries(provenance.sources)) {
+    assert.ok(covered.has(symbol) && PROFILES[symbol], symbol);
+    assert.equal(new URL(url).protocol, "https:", symbol);
+  }
 });
 
 async function withFetch(handler, run) {

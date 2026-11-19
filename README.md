@@ -22,6 +22,7 @@ AI 可以检查并配置 Pages 项目、D1 绑定、本地环境和首次部署�
 - `functions/_middleware.js`：将 `/api/*` 请求转交给 `worker.js`。
 - `worker.js`：使用 Workers Fetch API 和 D1 实现行情、排名、历史数据、公司资料等接口。
 - `profiles.js`：内置的公司中文简介和行业（代码 → `[行业, 简介]`）。`/api/fundamentals` 优先返回这里的内容；未收录的公司尝试取 Yahoo 的英文简介，取不到时页面隐藏"公司简介"区块。修改后重新部署即生效。
+- `data/profile-constituents.json`、`data/profile-sources.json`：分别记录本次核对的标普 500、纳斯达克 100 成分股快照，以及新增中文简介的逐代码来源与核对日期。快照用于覆盖率测试，不参与线上指数成分更新。指数换股后可按同一流程补录，再运行 `npm test` 验证。
 - `migrations/0001_init.sql`：创建行情历史表 `bars` 和缓存表 `cache`。Worker 目前只使用 `cache`；`bars` 表保留但不再写入。
 - `wrangler.toml`：保存 Pages 输出目录和 D1 绑定配置。
 
