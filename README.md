@@ -151,6 +151,7 @@ curl -i https://你的项目.pages.dev/api/fundamentals/AAPL
 - 首页返回 HTTP 200，并能加载行情列表。
 - `/api/indices` 返回指数列表。
 - `/api/rank` 能识别 `1d`、`1wk`、`1mo`、`3mo`、`6mo`、`1y`。
+- `/api/stock`、`/api/index-history`、`/api/rank` 支持用 `start`、`end`（`YYYY-MM-DD`）查询自定义日期区间，涨跌幅以区间前一交易日收盘价为基准；`/api/rank` 的自定义区间限最近一年内。
 - 历史数据接口返回日期和 K 线数据。
 - 基本面接口即使 Yahoo 数据源不可用，也应返回可显示的兜底结果，而不是让整个页面报错。
 - Cloudflare 部署日志中不再出现 `public not found` 或 `build output directory is outside of the repository`。

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replace the separate chart and movers period buttons with one page-wide time-range bar, and add a custom date range (`start`/`end` on `/api/stock`, `/api/index-history` and `/api/rank`) whose change is measured from the close before the range.
 - Add bundled Chinese company profiles (`profiles.js`) and serve them from `/api/fundamentals`; remove the placeholder summary and hide the profile section when no summary exists.
 - Move the movers period buttons into a shared header so the gainers and losers lists line up row by row.
 - Fix the homepage chart staying blank after one failed load, stale responses overwriting the selected company, the mobile auto-scroll on first load, and the movers period resetting when the index changes.

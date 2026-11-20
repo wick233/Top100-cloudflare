@@ -194,6 +194,45 @@ test("constituents are scraped once and shared by the stocks, quote and rank rou
   });
 });
 
+test("a custom date window slices cached history and measures change from the prior close", async () => {
+  // Four daily bars ending today, so the test does not depend on the calendar date.
+  const closes = [100, 110, 121, 133.1];
+  const noon = Math.floor(Date.now() / 86400000) * 86400 + 43200;
+  const stamps = closes.map((_, i) => noon - (closes.length - 1 - i) * 86400);
+  const [d0, d1, d2, d3] = stamps.map((ts) => new Date(ts * 1000).toISOString().slice(0, 10));
+  const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const chart = () => new Response(JSON.stringify({ chart: { result: [{ meta: {}, timestamp: stamps,
+    indicators: { quote: [{ open: closes, high: closes, low: closes, close: closes, volume: closes.map(() => 1000) }] } }] } }));
+  const env = fakeEnv();
+  const call = (path) => worker.fetch(new Request(`https://example.test${path}`), env);
+  const requested = [];
+  await withFetch((url) => { requested.push(url); return chart(); }, async () => {
+    const oneDay = await (await call(`/api/stock/AAPL?start=${d2}&end=${d2}`)).json();
+    assert.equal(oneDay.range, "custom");
+    assert.deepEqual([oneDay.start, oneDay.end, oneDay.bars.length, oneDay.prev_close], [d2, d2, 1, 110]);
+    // The window is cut from the smallest preset range that covers it.
+    assert.ok(requested[0].includes("range=1mo"));
+
+    const twoDays = await (await call(`/api/stock/AAPL?start=${d1}&end=${d2}`)).json();
+    assert.deepEqual([twoDays.bars.length, twoDays.prev_close], [2, 100]);
+    // No bar precedes the first one, so there is no baseline close.
+    assert.equal((await (await call(`/api/stock/AAPL?start=${d0}&end=${d3}`)).json()).prev_close, null);
+
+    const indexDay = await (await call(`/api/index-history/sp500?start=${d3}`)).json();
+    assert.deepEqual([indexDay.bars.length, indexDay.prev_close], [1, 121]);
+
+    const rank = await (await call(`/api/rank?index=top100&start=${d2}&end=${d2}`)).json();
+    const apple = rank.find((row) => row.symbol === "AAPL");
+    assert.deepEqual([apple.chg_pct, apple.start_date, apple.date, apple.prev_close], [10, d2, d2, 110]);
+
+    assert.equal((await call(`/api/stock/AAPL?start=${daysAgo(20)}&end=${daysAgo(15)}`)).status, 404);
+    assert.equal((await call("/api/stock/AAPL?start=2026-13-45")).status, 400);
+    assert.equal((await call(`/api/stock/AAPL?start=${d2}&end=${d1}`)).status, 400);
+    assert.equal((await call(`/api/stock/AAPL?start=${daysAgo(-30)}`)).status, 400);
+    assert.equal((await call(`/api/rank?index=top100&start=${daysAgo(900)}&end=${daysAgo(890)}`)).status, 400);
+  });
+});
+
 test("non-API requests are delegated to Pages assets", async () => {
   const env = fakeEnv();
   const response = await worker.fetch(new Request("https://example.test/"), env);

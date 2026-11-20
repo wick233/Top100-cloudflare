@@ -131,11 +131,48 @@ function companyName(symbol) {
   return symbol;
 }
 
-async function historyResponse(env, ticker, range, interval, displayName = companyName(ticker)) {
-  const { bars } = await getBars(env, ticker, interval, range);
-  if (!bars.length) throw new Error(`${ticker} has no history`);
-  return { ticker, name: displayName, range, interval, start: bars[0].date, end: bars.at(-1).date,
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Preset ranges that can serve a custom date window, shortest first, with the number of
+// calendar days back from today each one reliably covers.
+const COVERING = [["1mo", 28], ["3mo", 88], ["6mo", 178], ["1y", 360], ["2y", 725], ["5y", 1820]];
+
+// Reads the optional start/end (YYYY-MM-DD) query params. Returns null when no custom
+// window was requested, { error } when it is invalid, otherwise { start, end, covering }.
+// A custom window is served by slicing the smallest preset range that contains it, so
+// it shares the per-ticker cache with the preset buttons instead of adding upstream calls.
+function customWindow(url) {
+  const start = url.searchParams.get("start");
+  if (!start) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  const end = url.searchParams.get("end") || today;
+  const valid = (d) => DATE_RE.test(d) && !Number.isNaN(Date.parse(`${d}T00:00:00Z`));
+  if (!valid(start) || !valid(end)) return { error: "日期格式需为 YYYY-MM-DD" };
+  if (start > end) return { error: "开始日期不能晚于结束日期" };
+  // The page sends dates in the viewer's time zone, which can be a day ahead of UTC.
+  if (start > new Date(Date.now() + 86400000).toISOString().slice(0, 10)) return { error: "开始日期不能晚于今天" };
+  // 10 extra days so the bar before `start` (the baseline close) is covered across holidays.
+  const age = (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000 + 10;
+  return { start, end, covering: COVERING.find(([, days]) => age <= days)?.[0] || "max" };
+}
+
+// Bars inside the window, plus the close of the last bar before it. That earlier close
+// is the baseline for the window's change, so a one-day window yields that day's move.
+async function windowBars(env, ticker, interval, win) {
+  const { bars } = await getBars(env, ticker, interval, win.covering);
+  const before = bars.filter((b) => b.date < win.start).at(-1);
+  return { bars: bars.filter((b) => b.date >= win.start && b.date <= win.end), prevClose: before ? before.close : null };
+}
+
+async function historyResponse(env, ticker, range, interval, displayName = companyName(ticker), win = null) {
+  const { bars, prevClose } = win ? await windowBars(env, ticker, interval, win) : { bars: (await getBars(env, ticker, interval, range)).bars, prevClose: null };
+  if (!bars.length) throw Object.assign(new Error(win ? "所选日期内没有交易数据" : `${ticker} has no history`), { status: win ? 404 : 502 });
+  return { ticker, name: displayName, range: win ? "custom" : range, interval, start: bars[0].date, end: bars.at(-1).date, prev_close: prevClose,
     bars: bars.map((b) => [b.date, b.open, b.close, b.low, b.high, b.volume]) };
+}
+
+// An empty custom window is the caller's choice of dates (404), not an upstream failure (502).
+function historyError(prefix, e) {
+  return e?.status === 404 ? error(e.message, 404) : error(`${prefix}: ${e.message}`, 502);
 }
 
 async function stocksRoute(url, env) {
@@ -168,9 +205,13 @@ async function quoteRoute(symbol, env) {
 async function rankRoute(url, env) {
   const index = (url.searchParams.get("index") || "top100").toLowerCase();
   if (!INDICES[index]) return error(`未知指数: ${index}`, 400);
+  const win = customWindow(url);
+  if (win?.error) return error(win.error);
+  // Ranking loads history for every constituent, so it is limited to the last year.
+  if (win && !["1mo", "3mo", "6mo", "1y"].includes(win.covering)) return error("涨跌榜仅支持最近一年内的日期");
   const range = url.searchParams.get("range") || "1d";
-  if (!["1d", "1wk", "1mo", "3mo", "6mo", "1y"].includes(range)) return error("range 需为 1d、1wk、1mo、3mo、6mo 或 1y");
-  const key = `rank:${index}:${range}`;
+  if (!win && !["1d", "1wk", "1mo", "3mo", "6mo", "1y"].includes(range)) return error("range 需为 1d、1wk、1mo、3mo、6mo 或 1y");
+  const key = win ? `rank:${index}:${win.start}:${win.end}` : `rank:${index}:${range}`;
   const hit = await cached(env, key);
   if (hit) return json(hit);
   const members = await constituents(env, index);
@@ -178,15 +219,18 @@ async function rankRoute(url, env) {
     // The constituent list carries the real company name; companyName() only knows bundled symbols.
     const name = listedName || companyName(symbol);
     try {
-      const requestedRange = range === "1d" ? "1mo" : range;
-      const { bars } = await getBars(env, symbol, "1d", requestedRange);
-      if (bars.length < 2) throw new Error("missing previous close");
-      const last = bars.at(-1), start = range === "1d" ? bars.at(-2) : bars[0];
-      const change = Number(((last.close - start.close) / start.close * 100).toFixed(2));
-      return { symbol, name, price: last.close, prev_close: start.close, chg_pct: change, date: last.date, start_date: start.date };
+      const { bars, prevClose } = win ? await windowBars(env, symbol, "1d", win)
+        : { bars: (await getBars(env, symbol, "1d", range === "1d" ? "1mo" : range)).bars, prevClose: null };
+      if (!bars.length || (!win && bars.length < 2)) throw new Error("not enough bars");
+      const last = bars.at(-1);
+      // Baseline: the close before a custom window, the previous bar for 1d, else the first bar.
+      const base = win ? { close: prevClose ?? bars[0].close, date: bars[0].date } : range === "1d" ? bars.at(-2) : bars[0];
+      const change = Number(((last.close - base.close) / base.close * 100).toFixed(2));
+      return { symbol, name, price: last.close, prev_close: base.close, chg_pct: change, date: last.date, start_date: base.date };
     } catch { return { symbol, name, price: null, prev_close: null, chg_pct: null, date: null, start_date: null }; }
   }));
-  await putCache(env, key, rows, 60);
+  // A finished custom window does not change, so it can be kept longer than a live ranking.
+  await putCache(env, key, rows, win && rows.some((row) => row.chg_pct != null) ? 300 : 60);
   return json(rows);
 }
 
@@ -288,10 +332,12 @@ async function api(request, env) {
       catch (e) { return error(e.message, 502); }
     }
     if (kind === "stock") {
+      const win = customWindow(url);
+      if (win?.error) return error(win.error);
       const range = url.searchParams.get("range") || "1mo", interval = url.searchParams.get("interval") || "1d";
-      if (!RANGES.has(range) || !INTERVALS.has(interval)) return error("无效的 range 或 interval");
-      try { return json(await historyResponse(env, symbol, range, interval)); }
-      catch (e) { return error(`拉取数据失败: ${e.message}`, 502); }
+      if ((!win && !RANGES.has(range)) || !INTERVALS.has(interval)) return error("无效的 range 或 interval");
+      try { return json(await historyResponse(env, symbol, range, interval, undefined, win)); }
+      catch (e) { return historyError("拉取数据失败", e); }
     }
   }
   if (path === "/api/rank") return rankRoute(url, env);
@@ -299,10 +345,12 @@ async function api(request, env) {
   if (path === "/api/index-history/" || path.startsWith("/api/index-history/")) {
     const id = path.split("/").at(-1).toLowerCase();
     if (!INDEX_HISTORY[id]) return error("index_id 需为 sp500 或 ndx100");
+    const win = customWindow(url);
+    if (win?.error) return error(win.error);
     const range = url.searchParams.get("range") || "1y", interval = url.searchParams.get("interval") || "1d";
-    if (!RANGES.has(range) || !INTERVALS.has(interval)) return error("无效的时间范围或周期");
-    try { return json(await historyResponse(env, INDEX_HISTORY[id].ticker, range, interval, INDEX_HISTORY[id].name)); }
-    catch (e) { return error(`拉取指数数据失败: ${e.message}`, 502); }
+    if ((!win && !RANGES.has(range)) || !INTERVALS.has(interval)) return error("无效的时间范围或周期");
+    try { return json(await historyResponse(env, INDEX_HISTORY[id].ticker, range, interval, INDEX_HISTORY[id].name, win)); }
+    catch (e) { return historyError("拉取指数数据失败", e); }
   }
   if (path === "/api/export/" || path.startsWith("/api/export/")) {
     const symbol = decodeURIComponent(path.split("/").at(-1)).toUpperCase();
